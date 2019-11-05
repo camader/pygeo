@@ -198,6 +198,7 @@ class DVGeometry(object):
     def addRefAxis(self, name, curve=None, xFraction=None, volumes=None,
                    rotType=5, axis='x', alignIndex=None, rotAxisVar=None,
                    xFractionOrder=2, includeVols=[], ignoreInd=[],
+                   includeVolsSymm=[], ignoreIndSymm=[],
                    raySize=1.5):
         """
         This function is used to add a 'reference' axis to the
@@ -360,7 +361,10 @@ class DVGeometry(object):
             if alignIndex is None:
                 raise Error('Must specify alignIndex to use xFraction.')
 
-            # Get index direction along which refaxis will be aligned
+            # if self.FFD.symmPlane is not None:
+            #     raise Error('symmPlane option not implemented with xFraction option.')
+
+             # Get index direction along which refaxis will be aligned
             if alignIndex.lower() == 'i':
                 alignIndex = 0
                 faceCol = 2
@@ -370,77 +374,216 @@ class DVGeometry(object):
             elif alignIndex.lower() == 'k':
                 alignIndex = 2
                 faceCol = 0
+            if self.FFD.symmPlane is None:
+               
+                if volumes is None:
+                    volumes = range(self.FFD.nVol)
 
-            if volumes is None:
-                volumes = range(self.FFD.nVol)
+                # Reorder the volumes in sequential order and check if orientation is correct
+                v = list(volumes)
+                nVol = len(v)
+                volOrd = [v.pop(0)]
+                faceLink = self.FFD.topo.faceLink
+                for iter in range(nVol):
+                    for vInd, i in enumerate(v):
+                        for pInd, j in enumerate(volOrd):
+                            if faceLink[i,faceCol] == faceLink[j,faceCol+1]:
+                                volOrd.insert(pInd+1, v.pop(vInd))
+                                break
+                            elif faceLink[i,faceCol+1] == faceLink[j,faceCol]:
+                                volOrd.insert(pInd, v.pop(vInd))
+                                break
 
-            # Reorder the volumes in sequential order and check if orientation is correct
-            v = list(volumes)
-            nVol = len(v)
-            volOrd = [v.pop(0)]
-            faceLink = self.FFD.topo.faceLink
-            for iter in range(nVol):
-                for vInd, i in enumerate(v):
-                    for pInd, j in enumerate(volOrd):
-                        if faceLink[i,faceCol] == faceLink[j,faceCol+1]:
-                            volOrd.insert(pInd+1, v.pop(vInd))
-                            break
-                        elif faceLink[i,faceCol+1] == faceLink[j,faceCol]:
-                            volOrd.insert(pInd, v.pop(vInd))
-                            break
+                if len(volOrd) < nVol:
+                    raise Error("The volumes are not ordered with matching faces"
+                                " in the direction of the reference axis.")
 
-            if len(volOrd) < nVol:
-                raise Error("The volumes are not ordered with matching faces"
-                            " in the direction of the reference axis.")
+                # Count total number of sections and check if volumes are aligned
+                # face to face along refaxis direction
+                lIndex = self.FFD.topo.lIndex
+                nSections = []
+                for i in range(len(volOrd)):
+                    if i == 0:
+                        nSections.append(lIndex[volOrd[i]].shape[alignIndex])
+                    else:
+                        nSections.append(lIndex[volOrd[i]].shape[alignIndex] - 1)
 
-            # Count total number of sections and check if volumes are aligned
-            # face to face along refaxis direction
-            lIndex = self.FFD.topo.lIndex
-            nSections = []
-            for i in range(len(volOrd)):
-                if i == 0:
-                    nSections.append(lIndex[volOrd[i]].shape[alignIndex])
-                else:
-                    nSections.append(lIndex[volOrd[i]].shape[alignIndex] - 1)
+                refaxisNodes = numpy.zeros((sum(nSections), 3))
 
-            refaxisNodes = numpy.zeros((sum(nSections), 3))
+                # Loop through sections and compute node location
+                place = 0
+                for j, vol in enumerate(volOrd):
+                    sectionArr = numpy.rollaxis(lIndex[vol], alignIndex, 0)
+                    skip = 0
+                    if j > 0:
+                        skip = 1
+                    for i in range(nSections[j]):
+                        LE = numpy.min(self.FFD.coef[sectionArr[i+skip,:,:],0])
+                        TE = numpy.max(self.FFD.coef[sectionArr[i+skip,:,:],0])
+                        refaxisNodes[place+i,0] = xFraction*(TE - LE) + LE
+                        refaxisNodes[place+i,1] = numpy.mean(self.FFD.coef[sectionArr[i+skip,:,:],1])
+                        refaxisNodes[place+i,2] = numpy.mean(self.FFD.coef[sectionArr[i+skip,:,:],2])
+                    place += i + 1
 
-            # Loop through sections and compute node location
-            place = 0
-            for j, vol in enumerate(volOrd):
-                sectionArr = numpy.rollaxis(lIndex[vol], alignIndex, 0)
-                skip = 0
-                if j > 0:
-                    skip = 1
-                for i in range(nSections[j]):
-                    LE = numpy.min(self.FFD.coef[sectionArr[i+skip,:,:],0])
-                    TE = numpy.max(self.FFD.coef[sectionArr[i+skip,:,:],0])
-                    refaxisNodes[place+i,0] = xFraction*(TE - LE) + LE
-                    refaxisNodes[place+i,1] = numpy.mean(self.FFD.coef[sectionArr[i+skip,:,:],1])
-                    refaxisNodes[place+i,2] = numpy.mean(self.FFD.coef[sectionArr[i+skip,:,:],2])
-                place += i + 1
+                # Add additional volumes
+                for iVol in includeVols:
+                    if iVol not in volumes:
+                        volumes.append(iVol)
 
-            # Add additional volumes
-            for iVol in includeVols:
-                if iVol not in volumes:
-                    volumes.append(iVol)
+                # Generate reference axis pySpline curve
+                curve = pySpline.Curve(X=refaxisNodes, k=2)
+                nAxis = len(curve.coef)
+                self.axis[name] = {'curve':curve, 'volumes':volumes,
+                                   'rotType':rotType, 'axis':axis,
+                                   'rotAxisVar':rotAxisVar}
+            else:
 
-            # Generate reference axis pySpline curve
-            curve = pySpline.Curve(X=refaxisNodes, k=2)
-            nAxis = len(curve.coef)
-            self.axis[name] = {'curve':curve, 'volumes':volumes,
-                               'rotType':rotType, 'axis':axis,
-                               'rotAxisVar':rotAxisVar}
+                # get the direction of the symmetry plane
+                if self.FFD.symmPlane.lower() == 'x':
+                    index = 0
+                elif self.FFD.symmPlane.lower() == 'y':
+                    index = 1
+                elif self.FFD.symmPlane.lower() == 'z':
+                    index = 2
+
+                # mirror the axis and attach the mirrored vols
+                if volumes is None:
+                    volumes = numpy.arange(self.FFD.nVol/2)
+
+                volumesSymm = []
+                for volume in volumes:
+                    volumesSymm.append(volume+self.FFD.nVol/2)
+
+                # Reorder the volumes in sequential order and check if orientation is correct
+                v = list(volumes)
+                nVol = len(v)
+                volOrd = [v.pop(0)]
+                faceLink = self.FFD.topo.faceLink
+                for iter in range(nVol):
+                    for vInd, i in enumerate(v):
+                        for pInd, j in enumerate(volOrd):
+                            if faceLink[i,faceCol] == faceLink[j,faceCol+1]:
+                                volOrd.insert(pInd+1, v.pop(vInd))
+                                break
+                            elif faceLink[i,faceCol+1] == faceLink[j,faceCol]:
+                                volOrd.insert(pInd, v.pop(vInd))
+                                break
+
+                if len(volOrd) < nVol:
+                    raise Error("The volumes are not ordered with matching faces"
+                                " in the direction of the reference axis.")
+
+                vSymm = list(volumesSymm)
+                nVolSymm = len(vSymm)
+                volOrdSymm = [vSymm.pop(0)]
+                faceLink = self.FFD.topo.faceLink
+                for iter in range(nVolSymm):
+                    for vInd, i in enumerate(vSymm):
+                        for pInd, j in enumerate(volOrdSymm):
+                            if faceLink[i,faceCol] == faceLink[j,faceCol+1]:
+                                volOrdSymm.insert(pInd+1, vSymm.pop(vInd))
+                                break
+                            elif faceLink[i,faceCol+1] == faceLink[j,faceCol]:
+                                volOrdSymm.insert(pInd, vSymm.pop(vInd))
+                                break
+
+                if len(volOrdSymm) < nVolSymm:
+                    raise Error("The volumes are not ordered with matching faces"
+                                " in the direction of the reference axis.")
+
+                
+                # Count total number of sections and check if volumes are aligned
+                # face to face along refaxis direction
+                lIndex = self.FFD.topo.lIndex
+                nSections = []
+                for i in range(len(volOrd)):
+                    if i == 0:
+                        nSections.append(lIndex[volOrd[i]].shape[alignIndex])
+                    else:
+                        nSections.append(lIndex[volOrd[i]].shape[alignIndex] - 1)
+
+                refaxisNodes = numpy.zeros((sum(nSections), 3))
+
+                nSectionsSymm = []
+                for i in range(len(volOrdSymm)):
+                    if i == 0:
+                        nSectionsSymm.append(lIndex[volOrdSymm[i]].shape[alignIndex])
+                    else:
+                        nSectionsSymm.append(lIndex[volOrdSymm[i]].shape[alignIndex] - 1)
+
+                refaxisNodesSymm = numpy.zeros((sum(nSectionsSymm), 3))
+
+                # Loop through sections and compute node location
+                place = 0
+                for j, vol in enumerate(volOrd):
+                    sectionArr = numpy.rollaxis(lIndex[vol], alignIndex, 0)
+                    skip = 0
+                    if j > 0:
+                        skip = 1
+                    for i in range(nSections[j]):
+                        LE = numpy.min(self.FFD.coef[sectionArr[i+skip,:,:],0])
+                        TE = numpy.max(self.FFD.coef[sectionArr[i+skip,:,:],0])
+                        refaxisNodes[place+i,0] = xFraction*(TE - LE) + LE
+                        refaxisNodes[place+i,1] = numpy.mean(self.FFD.coef[sectionArr[i+skip,:,:],1])
+                        refaxisNodes[place+i,2] = numpy.mean(self.FFD.coef[sectionArr[i+skip,:,:],2])
+                    place += i + 1
+
+                # Loop through sections and compute node location
+                place = 0
+                for j, vol in enumerate(volOrdSymm):
+                    sectionArrSymm = numpy.rollaxis(lIndex[vol], alignIndex, 0)
+                    skip = 0
+                    if j > 0:
+                        skip = 1
+                    for i in range(nSectionsSymm[j]):
+                        LE = numpy.min(self.FFD.coef[sectionArrSymm[i+skip,:,:],0])
+                        TE = numpy.max(self.FFD.coef[sectionArrSymm[i+skip,:,:],0])
+                        refaxisNodesSymm[place+i,0] = xFraction*(TE - LE) + LE
+                        refaxisNodesSymm[place+i,1] = numpy.mean(self.FFD.coef[sectionArrSymm[i+skip,:,:],1])
+                        refaxisNodesSymm[place+i,2] = numpy.mean(self.FFD.coef[sectionArrSymm[i+skip,:,:],2])
+                    place += i + 1
+
+                # Add additional volumes
+                for iVol in includeVols:
+                    if iVol not in volumes:
+                        volumes.append(iVol)
+
+                # Add additional volumes
+                for iVol in includeVolsSymm:
+                    if iVol not in volumesSymm:
+                        volumesSymm.append(iVol)
+
+                        
+                # Generate reference axis pySpline curve
+                curve = pySpline.Curve(X=refaxisNodes, k=2)
+                nAxis = len(curve.coef)
+                self.axis[name] = {'curve':curve, 'volumes':volumes,
+                                   'rotType':rotType, 'axis':axis,
+                                   'rotAxisVar':rotAxisVar}
+
+                # Generate reference axis pySpline curve
+                curveSymm = pySpline.Curve(X=refaxisNodesSymm, k=2)
+                curveSymm.reverse()
+                nAxis = len(curveSymm.coef)
+                self.axis[name+'Symm'] = {'curve':curveSymm, 'volumes':volumesSymm,
+                                          'rotType':rotType, 'axis':axis,
+                                          'rotAxisVar':rotAxisVar}
+
+                
         else:
             raise Error("One of 'curve' or 'xFraction' must be "
                         "specified for a call to addRefAxis")
 
         # Specify indices to be ignored
         self.axis[name]['ignoreInd'] = ignoreInd
+        if self.FFD.symmPlane is not None:
+            self.axis[name+'Symm']['ignoreInd'] = ignoreIndSymm
 
         # Add the raySize multiplication factor for this axis
         self.axis[name]['raySize'] = raySize
-
+        if self.FFD.symmPlane is not None:
+            self.axis[name+'Symm']['raySize'] = raySize
+            
         return nAxis
 
     def addPointSet(self, points, ptName, origConfig=True, **kwargs):
